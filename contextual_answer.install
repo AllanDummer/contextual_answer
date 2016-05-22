@@ -1,0 +1,132 @@
+<?php
+
+/**
+ * Contextual answer questions.
+ * @file
+ */
+
+/**
+ * Implements hook_install().
+ */
+function contextual_answer_install() {
+  // Add body field to contextual answer node
+  quiz_question_add_body_field('contextual_answer');
+
+  variable_set('node_options_contextual_answer', array('status'));
+}
+
+/**
+ * Implements hook_schema().
+ */
+function contextual_answer_schema() {
+  // Properties for a question nodes go in here:
+  $schema['quiz_contextual_answer_node_properties'] = array(
+    'fields' => array(
+      'nid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'vid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'correct_answers' => array(
+        'type' => 'blob', //Store answer options in a serialized array
+      ),
+      'correct_text' => array(
+        'type' => 'text',
+      ),
+      'max_score' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 1,
+      ),
+      'answer_score' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 1,
+      ),
+      // One of exact (0), case insensitive (1)
+      'correct_answer_evaluation' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0
+      ),
+      'show_feedback' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      // Minimum percentage
+      'minimum_percentage' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0
+      ),
+      // Feedback if answer is passed
+      'feedback_pass' => array(
+        'type' => 'text'
+      ),
+      // Feedback if answer is failed
+      'feedback_fail' => array(
+        'type' => 'text'
+      ),
+    ),
+    'primary key' => array('nid', 'vid'),
+  );
+
+  // User answers go in here.
+  $schema['quiz_contextual_answer_user_answers'] = array(
+    'fields' => array(
+      'answer_id' => array(
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'result_answer_id' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+      ),
+      'score' => array(
+        'type' => 'float',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'is_evaluated' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'size' => 'tiny',
+        'default' => 0,
+        'not null' => TRUE,
+      ),
+      'answer' => array(
+        'type' => 'text'
+      ),
+      'answer_feedback' => array(
+        'type' => 'text'
+      ),
+      'answer_feedback_format' => array(
+        'type' => 'varchar',
+        'length' => 255,
+      ),
+    ),
+    'primary key' => array('answer_id'),
+    'unique keys' => array(
+      'result_answer_id' => array('result_answer_id'),
+    ),
+  );
+
+  return $schema;
+}

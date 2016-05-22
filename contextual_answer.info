@@ -1,0 +1,13 @@
+name = Contextual Answer
+package = Quiz Question
+description = This provides contextual answer (essay, multi-paragraph) question types for use by the Quiz module.
+dependencies[] = quiz
+dependencies[] = quiz_question
+core = 7.x
+
+files[] = contextual_answer.classes.inc
+files[] = contextual_answer.test
+
+;version = "7.x-5.0-beta1+3-dev"
+;core = "7.x"
+

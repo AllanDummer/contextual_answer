@@ -1,0 +1,779 @@
+<?php
+
+/**
+ * This module defines a contextual answer question type for quizzes.
+ *
+ * Contextual answer questions make use of the quiz question framework (quiz_question.module).
+ * The functions in this file are largely used for grading contextual answer questions. Most
+ * of the real logic is in contextual_answer.classes.inc.
+ *
+ * @file
+ */
+
+/**
+ * Implements hook_help().
+ */
+function contextual_answer_help( $path, $arg ) {
+  if ($path == 'admin/help#contextual_answer') {
+    return '<p>' . t ( 'This module provides contextual answer questions (essay, multi-paragraph) to the quiz module.' ) . '</p><p>' . t ( 'A contextual answer question is designed to provide the quiz taker a lengthy area to expand on ideas.
+      Common forms of contextual answer questions include essays, single paragraph responses, hypothesis design problems,
+      outlines and summaries, and lengthier math problems
+      where the focus is on showing work rather than simply getting the correct answer.' ) . '</p>';
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function contextual_answer_menu() {
+  $items ['admin/quiz/reports/score-contextual-answer'] = array (
+      'title' => 'Score contextual answer questions',
+      'description' => 'Score the answers from quizzes that use contextual answer questions.',
+      'page callback' => 'contextual_answer_view_unscored',
+      'access arguments' => array (
+          'score any quiz',
+          'score own quiz',
+          'score taken quiz answer' 
+      ),
+      'access callback' => 'quiz_access_multi_or',
+      'type' => MENU_NORMAL_ITEM,
+      'file' => 'contextual_answer.admin.inc' 
+  );
+  // Pass vid and rid to this path.
+  $items ['admin/quiz/reports/score-contextual-answer/%/%'] = array (
+      'title' => 'Score contextual answer response',
+      'description' => 'Score a response to a contextual answer question.',
+      'page callback' => 'contextual_answer_edit_score',
+      'page arguments' => array (
+          4,
+          5 
+      ),
+      'type' => MENU_NORMAL_ITEM,
+      'access arguments' => array (
+          4,
+          5 
+      ),
+      'access callback' => 'quiz_question_access_to_score',
+      'file' => 'contextual_answer.admin.inc' 
+  );
+  
+  return $items;
+}
+
+/**
+ * Implements hook_quiz_question_info().
+ */
+function contextual_answer_quiz_question_info() {
+  return array (
+      'contextual_answer' => array (
+          'name' => t ( 'Contextual answer question' ),
+          'description' => t ( 'Quiz questions that allow a user to enter multiple paragraphs of text.' ),
+          'question provider' => 'ContextualAnswerQuestion',
+          'response provider' => 'ContextualAnswerResponse',
+          'module' => 'contextual_answer' 
+      ) 
+  ); // All wrapper functions are in that module.
+}
+
+/**
+ * Implements hook_quiz_question_config().
+ */
+function contextual_answer_quiz_question_config() {
+  $form ['contextual_answer_default_max_score'] = array (
+      '#type' => 'textfield',
+      '#title' => t ( 'Default max score' ),
+      '#description' => t ( 'Choose the default maximum score for a contextual answer question.' ),
+      '#default_value' => variable_get ( 'contextual_answer_default_max_score', 10 ) 
+  );
+  $form ['#validate'] [ ] = 'contextual_answer_config_validate';
+  return $form;
+}
+
+/**
+ * Validate the contextual_answer config form values
+ */
+function contextual_answer_config_validate( $form, $form_state ) {
+  if ($form_state ['values'] ['contextual_answer_default_max_score'] <= 0) {
+    form_set_error ( 'contextual_answer_default_max_score', t ( 'The default max score must be greater than 0' ) );
+  }
+}
+
+/**
+ * Returns a result report for a question response.
+ *
+ * The retaurned value is a form array because in some contexts the scores in the form
+ * is editable
+ *
+ * @param $question The
+ *          question node
+ * @return FAPI form array
+ */
+function contextual_answer_quiz_question_report_form( $question, $result_id ) {
+  $response_instance = _quiz_question_response_get_instance ( $result_id, $question );
+  $answer = $response_instance->question->answers [0];
+  // If need to specify the score weight if it isn't already specified.
+  if (! isset ( $response_instance->question->score_weight )) {
+    $vid = db_query ( 'SELECT vid FROM {quiz_node_results}
+      WHERE result_id = :rid', array (
+        ':rid' => $answer ['result_id'] 
+    ) )->fetchField ( );
+    
+    $qnr_max_score = db_query ( 'SELECT qnr.max_score FROM {quiz_node_relationship} qnr
+      WHERE qnr.child_vid = :child_vid AND qnr.parent_vid = :parent_vid', array (
+        ':child_vid' => $question->vid,
+        ':parent_vid' => $vid 
+    ) )->fetchField ( );
+    
+    if ($qnr_max_score === FALSE) {
+      $qnr_max_score = db_query ( 'SELECT qt.max_score FROM {quiz_node_results} qnr
+         JOIN {quiz_node_results_answers} qnra ON (qnr.result_id = qnra.result_id)
+         JOIN {quiz_terms} qt ON (qt.vid = qnr.vid AND qt.tid = qnra.tid)
+         WHERE qnr.result_id = :rid AND qnra.question_nid = :qnid AND qnra.question_vid = :qvid', array (
+          ':rid' => $answer ['result_id'],
+          ':qnid' => $question->nid,
+          ':qvid' => $question->vid 
+      ) )->fetchField ( );
+    }
+    
+    $response_instance->question->score_weight = ($qnr_max_score == 0 || $response_instance->question->max_score == 0) ? 0 : ($qnr_max_score / $response_instance->question->max_score);
+  }
+  
+  return $response_instance->getReportForm ( );
+}
+
+/**
+ * Returns a result report for a question response.
+ *
+ * The retaurned value is a form array because in some contexts the scores in the form
+ * is editable
+ *
+ * @param $question The
+ *          question node
+ * @return FAPI form array
+ */
+function contextual_answer_report_form( $question, $result_id ) {
+  $response_instance = _quiz_question_response_get_instance ( $result_id, $question );
+  $answer = $response_instance->question->answers [0];
+  // If need to specify the score weight if it isn't already specified.
+  if (! isset ( $response_instance->question->score_weight )) {
+    $vid = db_query ( 'SELECT vid FROM {quiz_node_results}
+      WHERE result_id = :rid', array (
+        ':rid' => $answer ['result_id'] 
+    ) )->fetchField ( );
+    
+    $qnr_max_score = db_query ( 'SELECT qnr.max_score FROM {quiz_node_relationship} qnr
+      WHERE qnr.child_vid = :child_vid AND qnr.parent_vid = :parent_vid', array (
+        ':child_vid' => $question->vid,
+        ':parent_vid' => $vid 
+    ) )->fetchField ( );
+    
+    if ($qnr_max_score === FALSE) {
+      $qnr_max_score = db_query ( 'SELECT qt.max_score FROM {quiz_node_results} qnr
+         JOIN {quiz_node_results_answers} qnra ON (qnr.result_id = qnra.result_id)
+         JOIN {quiz_terms} qt ON (qt.vid = qnr.vid AND qt.tid = qnra.tid)
+         WHERE qnr.result_id = :rid AND qnra.question_nid = :qnid AND qnra.question_vid = :qvid', array (
+          ':rid' => $answer ['result_id'],
+          ':qnid' => $question->nid,
+          ':qvid' => $question->vid 
+      ) )->fetchField ( );
+    }
+    
+    $response_instance->question->score_weight = ($qnr_max_score == 0 || $response_instance->question->max_score == 0) ? 0 : ($qnr_max_score / $response_instance->question->max_score);
+  }
+  
+  return $response_instance->getReportForm ( );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function contextual_answer_theme() {
+  return array (
+      'contextual_answer_view_unscored' => array (
+          'variables' => array (
+              'unscored' => array () 
+          ),
+          'path' => drupal_get_path ( 'module', 'contextual_answer' ) . '/theme',
+          'file' => 'contextual-answer.theme.inc' 
+      ),
+      'contextual_answer_response_form' => array (
+          'render element' => 'form',
+          'path' => drupal_get_path ( 'module', 'contextual_answer' ) . '/theme',
+          'file' => 'contextual-answer.theme.inc' 
+      ),
+      'contextual_answer_answering_form' => array (
+          'render element' => 'form',
+          'path' => drupal_get_path ( 'module', 'contextual_answer' ) . '/theme',
+          'template' => 'contextual-answer-answering-form' 
+      ),
+      'contextual_answer_quiz_question_score' => array (
+          'variables' => array (
+              'score' => NULL,
+              'max_score' => NULL 
+          ),
+          'path' => drupal_get_path ( 'module', 'contextual_answer' ) . '/theme',
+          'template' => 'contextual-answer-score' 
+      ) 
+  );
+}
+
+/**
+ * Set a score for a contextual answer question.
+ *
+ * This stores a score for a contextual answer question and marks that question as having been evaluated.
+ * The function updates all of the necessary data sources so that the individual answer results should be
+ * reflected in the total scoring table.
+ *
+ * @param $quiz Quiz
+ *          node.
+ * @param $nid Node
+ *          ID of question.
+ * @param $vid Version
+ *          ID of question.
+ * @param $result_id Result
+ *          ID for the quiz results.
+ * @param $score The
+ *          numeric score to assign the result.
+ * @param $update_total Shall
+ *          the total score be updated?
+ *          
+ * @return int Number of scores adjusted. If a change was made, this should be 1.
+ */
+function contextual_answer_score_an_answer( $values, $update_total = TRUE ) {
+  extract ( $values );
+  // Quiz scoring information is spread out across three tables:
+  // 1. The module should retain its own scoring information in any case where scoring is non-trivial.
+  // 2. The Quiz module retains a limited amount of scoring information.
+  // 3. The Quiz module retains an overall score for a quiz. This is the percentage score for the combination of all
+  // questions on the quiz.
+  //
+  // We update all three.
+  // First, we update the contextual answer table
+  $question_max_score = db_query ( 'SELECT max_score FROM {quiz_question_properties} WHERE nid = :nid AND vid = :vid', array (
+      ':nid' => $nid,
+      ':vid' => $vid 
+  ) )->FetchField ( );
+  
+  $quiz_max_score = db_query ( 'SELECT max_score FROM {quiz_node_relationship} WHERE parent_vid = :pvid AND child_vid = :cvid', array (
+      ':pvid' => $quiz->vid,
+      ':cvid' => $vid 
+  ) )->fetchField ( );
+  $question_node = node_load ( $nid, $vid );
+  $contextual_answer_response = new ContextualAnswerResponse ( $result_id, $question_node );
+  ddl ( $question_max_score, 'Qustion max score' );
+  ddl ( $quiz_max_score, 'Quiz max score' );
+  ddl ( $values, 'Values' );
+  $changed = db_update ( 'quiz_contextual_answer_user_answers' )->fields ( array (
+      'score' => $score * $question_max_score / $quiz_max_score,
+      'is_evaluated' => 1,
+      'answer_feedback' => isset ( $answer_feedback ['value'] ) ? $answer_feedback ['value'] : '',
+      'answer_feedback_format' => empty ( $answer_feedback ['format'] ) ? '' : $answer_feedback ['format'] 
+  ) )
+    ->condition ( 'result_answer_id', $contextual_answer_response->result_answer_id )
+    ->execute ( );
+  // ddl($contextual_answer_response, 'Changed = ' . $changed);
+  if ($changed > 0) {
+    // Second, we update the main quiz answers table
+    // What do we do about the quiz_node_results_answers table? It assumes strict
+    // bivalence (is_correct). I guess we consider any essay with over 50% to be correct?
+    $max = db_query ( 'SELECT max_score FROM {quiz_question_properties} WHERE vid = :vid', array (
+        ':vid' => $vid 
+    ) )->fetchField ( );
+    if ($max <= 0) {
+      $is_correct = 0;
+      $points_awarded = 0;
+    } else {
+      $is_correct = $score == $max ? 1 : 0;
+      $points_awarded = $score;
+    }
+    
+    db_update ( 'quiz_node_results_answers' )->fields ( array (
+        'points_awarded' => $points_awarded,
+        'is_correct' => $is_correct 
+    ) )
+      ->condition ( 'result_answer_id', $contextual_answer_response->result_answer_id )
+      ->execute ( );
+    
+    // Third, we update the main quiz results table
+    if ($update_total) {
+      quiz_update_total_score ( $quiz, $result_id );
+    }
+  }
+  
+  return $changed;
+}
+
+/**
+ * Get the answer for a question.
+ *
+ * This stores a score for a contextual answer question and marks that question as having been evaluated.
+ *
+ * @param $nid Node
+ *          ID of question.
+ * @param $vid Version
+ *          ID of question.
+ * @param $result_id Result
+ *          ID for the quiz results.
+ *          
+ * @return Assoc array
+ *         An array if successful, or FALSE if no result could be found. The array contains the following properties:
+ *         <code>
+ *         answer_id; // The answer ID
+ *         answer; // The full text of the answer
+ *         is_evaluated; // 0 if the question has not been evaluated, 1 if it has
+ *         score; // The score the evaluator gave the user; this should be 0 if is_evaluated is 0.
+ *         question_vid
+ *         question_nid
+ *         result_id
+ *         </code>
+ */
+function contextual_answer_get_answer( $question_nid, $question_vid, $result_id ) {
+  $result = db_query ( 'SELECT answer_id, answer, la.is_evaluated, la.score, question_vid, question_nid, la.result_id, la.answer_feedback, la.answer_feedback_format, rel.max_score AS rel_max_score FROM {quiz_contextual_answer_user_answers} la
+    JOIN {quiz_node_results} qnr ON (la.result_id = qnr.result_id)
+    JOIN {quiz_node_relationship} rel ON (qnr.vid = rel.parent_vid AND rel.child_vid = la.question_vid)
+    WHERE question_nid = :qnid AND question_vid = :qvid AND la.result_id = :rid', array (
+      ':qnid' => $question_nid,
+      ':qvid' => $question_vid,
+      ':rid' => $result_id 
+  ) )->fetchAssoc ( );
+  return $result ? $result : FALSE;
+}
+
+/**
+ * Given a quiz, return a list of all the unscored answers.
+ *
+ * @param $nid Node
+ *          ID for the quiz to check.
+ * @param $vid Version
+ *          ID for the quiz to check.
+ * @param $count Number
+ *          of items to return (default: 50).
+ * @param $offset Where
+ *          in the results we should start (default: 0).
+ *          
+ * @return Indexed array of result IDs that need to be scored.
+ */
+function contextual_answer_get_unscored_answers_by_question( $nid, $vid, $count = 50, $offset = 0 ) {
+  $results = db_query ( 'SELECT result_id FROM {quiz_contextual_answer_user_answers}
+    WHERE is_evaluated = :is_evaluated AND question_nid = :question_nid AND question_vid = :question_vid', array (
+      ':is_evaluated' => 0,
+      ':question_nid' => $nid,
+      ':question_vid' => $vid 
+  ) );
+  
+  $unscored = array ();
+  foreach ( $results as $result ) {
+    $unscored [ ] = $result->result_id;
+  }
+  return $unscored;
+}
+
+/**
+ * Get all quiz scores that have not yet been evaluated.
+ *
+ * @param $count Number
+ *          of items to return (default: 50).
+ * @param $offset Where
+ *          in the results we should start (default: 0).
+ *          
+ * @return Array of objects describing unanswered questions. Each object will have result_id, question_nid, and question_vid.
+ */
+function contextual_answer_get_all_unscored_answers( $count = 50, $offset = 0 ) {
+  $unscored = ContextualAnswerResponse::fetchAllUnscoredAnswers ( );
+  return $unscored;
+}
+
+/**
+ * Generate a list of contextual answer questions
+ *
+ * @return array containing nid as key and title as value
+ */
+function contextual_answer_questions_list() {
+  $questions = array ();
+  $results = db_query ( 'SELECT nid, title FROM {node} WHERE type = :type', array (
+      ':type' => 'contextual_answer' 
+  ) );
+  foreach ( $results as $result ) {
+    $questions [$result->nid] = check_plain ( $result->title );
+  }
+  return $questions;
+}
+
+/**
+ * Submit function for the report form
+ *
+ * @param $values The
+ *          FAPI $form_state['values']
+ */
+function contextual_answer_report_submit( $values ) {
+  contextual_answer_score_an_answer ( $values, FALSE );
+}
+
+function contextual_answer_node_presave( $node ) {
+  $form_id = '';
+  if (isset ( $node->form_id )) {
+    $form_id = $node->form_id;
+  }
+  
+  if ($node->type == 'contextual_answer' && $form_id == 'contextual_answer_node_form') {
+    // ddl ( $node, 'Node pre save' );
+    // Create a serialized array for the correct answer keyed by question.
+    $correct_answers = array ();
+    $array = array ();
+    
+    $body = $node->body ['und'] [0] ['value'];
+    // Strip out all the bold, we tidy that up later
+    $body = str_replace ( '<strong>', '', $body );
+    $body = str_replace ( '</strong>', '', $body );
+    
+    // Sometimes a cut $ paste leaves this behind.
+    $body = str_replace ( array (
+        '<p>&nbsp;',
+        '&nbsp;</p>',
+        '&nbsp;' 
+    ), array (
+        '<p>',
+        '</p>',
+        ' ' 
+    ), $body );
+    
+    if (isset ( $node->field_question_instruction ['und'] [0] ['value'] )) {
+      $instruction = $node->field_question_instruction ['und'] [0] ['value'];
+      $node->field_question_instruction ['und'] [0] ['value'] = str_replace ( array (
+          '<p>&nbsp;',
+          '&nbsp;</p>',
+          '&nbsp;' 
+      ), array (
+          '<p>',
+          '</p>',
+          ' ' 
+      ), $instruction );
+    }
+    
+    $correct_text = $body;
+    
+    // Turn the correct answers into an array and serialze it.
+    if (is_array ( $node->correct_answers )) {
+      $answers = $node->correct_answers;
+    } else {
+      $answers = explode ( "\n", $node->correct_answers );
+    }
+    
+    $body_pos = 0;
+    $correct_pos = 0;
+    $max_score = 0;
+    
+    foreach ( $answers as $row ) {
+      $array = explode ( "|", $row );
+      $skip = 0;
+      
+      if (count ( $array ) > 1) {
+        
+        $question = trim ( $array [0] );
+        $answer = trim ( $array [1] );
+        
+        $question = str_replace ( '&', '&amp;', $question );
+        $answer = str_replace ( '&', '&amp;', $answer );
+        
+        if (isset ( $array [2] )) {
+          $skip = trim ( $array [2] );
+          $skip = ( int ) $skip;
+          
+          if ($skip == '') {
+            $skip = 0;
+          }
+          
+          while ( $skip != 0 ) {
+            $body_pos = strpos ( $body, $question, $body_pos );
+            $correct_pos = strpos ( $correct_text, $question, $correct_pos );
+            
+            $body_pos = $body_pos + strlen ( $question );
+            $correct_pos = $correct_pos + strlen ( $question );
+            
+            $skip -= 1;
+          }
+        }
+        
+        $correct_answers [ ] = array (
+            'question' => $question,
+            'correct_answer' => $answer,
+            'skip' => $skip 
+        );
+        
+        $body_pos = strpos ( $body, $question, $body_pos );
+        $correct_pos = strpos ( $correct_text, $question, $correct_pos );
+        
+        $replace_question = '<strong>' . $question . '</strong>';
+        $replace_answer = '<strong>' . $answer . '</strong>';
+        
+        $body = substr_replace ( $body, $replace_question, $body_pos, strlen ( $question ) );
+        $correct_text = substr_replace ( $correct_text, $replace_answer, $correct_pos, strlen ( $question ) );
+        
+        $max_score += 1;
+        
+        $body_pos = $body_pos + strlen ( $replace_question );
+        $correct_pos = $correct_pos + strlen ( $replace_answer );
+      }
+    }
+    
+    $node->correct_text = $correct_text;
+    $node->correct_answers = serialize ( $correct_answers );
+    $node->max_score = $max_score;
+    $node->body ['und'] [0] ['value'] = $body;
+  }
+}
+
+/**
+ * Implements hook_field_extra_fields().
+ */
+function contextual_answer_field_extra_fields() {
+  $extra ['node'] ['contextual_answer'] = array (
+      'form' => array (
+          'correct_answers' => array (
+              'label' => t ( 'Correct Answers' ),
+              'description' => t ( 'Specify the criteria for grading the response.' ),
+              'weight' => - 4 
+          ) 
+      ) 
+  );
+  return $extra;
+}
+
+function contextual_answer_entity_view_alter( &$build, $type ) {
+  // ddl ( $build, 'Build' );
+}
+
+/**
+ * Implements hook_quiz_question_score().
+ */
+function contextual_answer_quiz_question_score( $quiz, $question_nid, $question_vid = NULL, $result_id = NULL ) {
+  if (! isset ( $quiz ) && ! isset ( $result_id )) {
+    return quiz_question_get_max_score ( $question_nid, $question_vid );
+  }
+  
+  // We avoid using node_load to increase performance...
+  $dummy_node = new stdClass ( );
+  $dummy_node->nid = $question_nid;
+  $dummy_node->vid = $question_vid;
+  
+  $question = _quiz_question_get_instance ( $dummy_node, TRUE );
+  if (! $question) {
+    return FALSE;
+  }
+  
+  $score = new stdClass ( );
+  $score->possible = $question->getMaximumScore ( );
+  $score->question_nid = $question->node->nid;
+  $score->question_vid = $question->node->vid;
+  
+  if (isset ( $result_id )) {
+    $response = _quiz_question_response_get_instance ( $result_id, $question->node );
+    $score->attained = $response->getScore ( );
+    $score->possible = $response->getMaxScore ( );
+    $score->is_evaluated = $response->isEvaluated ( );
+  }
+  
+  return $score;
+}
+
+function contextual_answer_form_alter( &$form, &$form_state, $form_id ) {
+  if ($form_id == 'quiz_question_answering_form') {
+    $question = reset ( $form ['question'] );
+    if ($question ['question'] ['#bundle'] == 'contextual_answer') {
+      
+      // ddl ( $form, 'Form' );
+      // ddl ( $form_state, 'Form state' );
+      // Get the question node
+      // ddl ( $_SESSION, 'Session' );
+      
+      $nid = $form ['#quiz'] ['nid'];
+      $qid = key ( $form ['question'] );
+      $pos = 0;
+      
+      if (! isset ( $form_state ['storage'] ) && ! isset ( $form_state ['values'] )) {
+        
+        if (isset ( $_SESSION ['quiz'] [$nid] ['contextual'] ['storage'] )) {
+          $form_state ['storage'] = $_SESSION ['quiz'] [$nid] ['contextual'] ['storage'];
+          $form_state ['storage'] ['answers'] ['result'] ['current'] = 0;
+          // $pos = $form_state ['storage'] ['pos'];
+        } else {
+          $body = $question ['question'] ['body'] [0] ['#markup'];
+          $form_state ['storage'] ['body'] = str_replace ( array (
+              '<strong>',
+              '</strong>' 
+          ), array (
+              '',
+              '' 
+          ), $body );
+          $form_state ['storage'] ['correct_text'] = $question ['question'] ['correct_text'];
+          
+          $form_state ['storage'] ['answers'] ['correct_answers'] = unserialize ( $question ['question'] ['correct_answers'] ['#markup'] );
+          $form_state ['storage'] ['answers'] ['current_key'] = 0;
+          $form_state ['storage'] ['answers'] ['total'] = count ( $form_state ['storage'] ['answers'] ['correct_answers'] );
+          
+          $form_state ['storage'] ['answers'] ['result'] = array (
+              'current' => 0,
+              'correct' => 0 
+          );
+          
+          $form_state ['storage'] ['answers'] ['qid'] = $qid;
+          $form_state ['storage'] ['answers'] ['user_answers'] = array ();
+        }
+      }
+      
+      $current_key = $form_state ['storage'] ['answers'] ['current_key'];
+      $body = $form_state ['storage'] ['body'];
+      $current = $form_state ['storage'] ['answers'] ['result'] ['current'];
+      
+      if ($current_key > 0) {
+        $previous_key = $current_key - 1;
+        $responce = $form_state ['storage'] ['answers'] ['user_answers'] [$previous_key];
+        // Include opening and closing tags because these will alway wrap the word
+        
+        $replace = '<span class="current-question">' . $responce ['question'] . '</span>';
+        $input = '<span class="current-question">' . $responce ['input'] . '</span>';
+        
+        $pos = strpos ( $body, $replace );
+        if ($pos) {
+          $body = substr_replace ( $body, $input, $pos, strlen ( $replace ) );
+          $pos = $pos + strlen ( $replace );
+        }
+      }
+      
+      if (! empty ( $current )) {
+        switch ($current) {
+          case 'correct' :
+            $body = str_replace ( 'current-question', 'correct-question', $body );
+            break;
+          case 'incorrect' :
+            $body = str_replace ( 'current-question', 'incorrect-question', $body );
+            break;
+        }
+      }
+      
+      $current_question = $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['question'];
+      $current_answer = $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['correct_answer'];
+      $skip = $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['skip'];
+      
+      while ( $skip != 0 ) {
+        $pos = strpos ( $body, $current_question, $pos );
+        $pos = $pos + strlen ( $current_question );
+        $skip -= 1;
+      }
+      
+      $form_state ['storage'] ['pos'] = $pos;
+      
+      $replace = ' <span class="current-question">' . $current_question . '</span>';
+      $pos = strpos ( $body, $current_question, $pos );
+      
+      $body = substr_replace ( $body, $replace, $pos, strlen ( $current_question ) );
+      $form ['question'] [$qid] ['question'] ['body'] [0] ['#markup'] = $body;
+      $form_state ['storage'] ['body'] = $body;
+      $_SESSION ['quiz'] [$nid] ['contextual'] ['storage'] = $form_state ['storage'];
+      
+      $total = $form_state ['storage'] ['answers'] ['total'];
+      
+      if ($current_key == $total) {
+        $form ['navigation'] ['submit'] ['#value'] = 'Finish';
+        $form ['#validate'] = array (
+            'contextual_answer_check_answer',
+            'quiz_question_answering_form_validate' 
+        );
+      } else {
+        $form ['navigation'] ['submit'] ['#value'] = 'Next';
+        $form ['#validate'] = array (
+            'contextual_answer_check_answer' 
+        );
+      }
+      // ddl ( $form, 'Form' );
+      // ddl ( $form_state ['storage'], 'Form state' );
+      // ddl ( $_SESSION, 'Session' );
+    }
+  }
+}
+
+function contextual_answer_check_answer( &$form, &$form_state ) {
+  // ddl($form, 'Check Form');
+  $qid = $form_state ['storage'] ['answers'] ['qid'];
+  $total = $form_state ['storage'] ['answers'] ['total'];
+  $current_key = $form_state ['storage'] ['answers'] ['current_key'];
+  
+  $input = str_replace ( '&', '&amp;', $form_state ['input'] ['question'] [$qid] ['answer'] );
+  
+  $correct = $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['correct_answer'];
+  $question = $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['question'];
+  
+  $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['input'] = $input;
+  
+  $result = $form_state ['storage'] ['answers'] ['result'];
+  
+  if ($input == $correct) {
+    $result ['current'] = 'correct';
+    $result ['correct'] = $result ['correct'] + 1;
+    drupal_set_message ( 'Your answer was correct.', 'status' );
+  } else {
+    $result ['current'] = 'incorrect';
+    $correct = $form_state ['storage'] ['answers'] ['correct_answers'] [$current_key] ['correct_answer'];
+    drupal_set_message ( 'Your answer was incorrect. The correct answer is: <strong>' . $correct . '</strong>', 'error' );
+  }
+  
+  $form_state ['storage'] ['answers'] ['result'] = $result;
+  
+  $form_state ['storage'] ['answers'] ['user_answers'] [$current_key] = array (
+      'question' => $question,
+      'correct' => $correct,
+      'input' => $input 
+  );
+  
+  $form_state ['storage'] ['answers'] ['current_key'] = $current_key + 1;
+  
+  $form_state ['input'] ['question'] [$qid] ['answer'] = '';
+  $form_state ['values'] ['question'] [$qid] ['answer'] = '';
+  
+  if ($current_key == $total - 1) {
+    contextual_answer_finalze_answers ( $form, $form_state, $qid, $current_key );
+  } else {
+    // Loop back to the existing form.
+    $form_state ['rebuild'] = TRUE;
+  }
+  // ddl ( $form_state, 'Form state' );
+}
+
+function contextual_answer_finalze_answers( &$form, &$form_state, $qid = NULL, $current_key = NULL ) {
+  $nid = $form ['#quiz'] ['nid'];
+  $body = $form_state ['storage'] ['body'];
+  $current = $form_state ['storage'] ['answers'] ['result'] ['current'];
+  
+  $responce = $form_state ['storage'] ['answers'] ['user_answers'] [$current_key];
+  
+  $replace = '<span class="current-question">' . $responce ['question'] . '</span>';
+  $input = '<span class="current-question">' . $responce ['input'] . '</span>';
+  $pos = strpos ( $body, $replace );
+  $body = substr_replace ( $body, $input, $pos, strlen ( $replace ) );
+  
+  if (! empty ( $current )) {
+    switch ($current) {
+      case 'correct' :
+        $body = str_replace ( 'current-question', 'correct-question', $body );
+        break;
+      case 'incorrect' :
+        $body = str_replace ( 'current-question', 'incorrect-question', $body );
+        break;
+    }
+  }
+  
+  $score = $form_state ['storage'] ['answers'] ['result'] ['correct'];
+  
+  $answer = array (
+      'answer' => $body,
+      'score' => $score,
+      'is_evaluated' => TRUE 
+  );
+  
+  // $answer = serialize($answer);
+  $form ['question'] [$qid] ['answer'] ['#value'] = $answer;
+  $form_state ['values'] ['question'] [$qid] ['answer'] = $answer;
+  $form_state ['input'] ['question'] [$qid] ['answer'] = $answer;
+  unset ( $_SESSION ['quiz'] [$nid] ['contextual'] ['storage'] );
+  // ddl ( $form_state, 'Form state end' );
+}
